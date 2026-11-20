@@ -221,3 +221,43 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Projeto: datasets, checkpoints e mapas intermediarios
+data/*
+!data/.gitkeep
+!data/splits/
+data/splits/*
+!data/splits/.gitkeep
+!data/splits/*.csv
+!data/splits/*.json
+
+checkpoints/*
+!checkpoints/.gitkeep
+!checkpoints/pretrained/
+checkpoints/pretrained/*
+!checkpoints/pretrained/.gitkeep
+!checkpoints/finetuned/
+checkpoints/finetuned/*
+!checkpoints/finetuned/.gitkeep
+
+results/maps/*
+!results/maps/.gitkeep
+
+*.pt
+*.pth
+*.pth.tar
+*.ckpt
+*.npy
+*.npz
+*.tgz
+*.tar.gz
+
+# LaTeX (docs/)
+*.aux
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.out
+*.synctex.gz
+*.toc
