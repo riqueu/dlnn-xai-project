@@ -1,0 +1,84 @@
+seed: 42
+
+data:
+  dataset: imagenette2-160
+  url: https://s3.amazonaws.com/fast-ai-imageclas/imagenette2-160.tgz
+  raw_dir: data/raw
+  splits_dir: data/splits
+  image_size: 224
+  num_classes: 10
+  val_ratio: 0.8
+  test_ratio: 0.2
+  xai_subset_per_class: 10
+  imagenet_mean: [0.485, 0.456, 0.406]
+  imagenet_std: [0.229, 0.224, 0.225]
+
+models:
+  vig_ti:
+    name: vig_ti_224_gelu
+    pretrained_ckpt: checkpoints/pretrained/vig_ti_74.5.pth.tar
+    num_classes: 10
+    k: 9
+  deit_tiny:
+    name: deit_tiny_patch16_224
+    pretrained: true
+    num_classes: 10
+
+training:
+  epochs: 15
+  batch_size: 32
+  num_workers: 4
+  optimizer: adamw
+  lr: 1.0e-4
+  weight_decay: 1.0e-2
+  scheduler: cosine
+  warmup_epochs: 1
+  early_stopping_patience: 5
+  checkpoint_dir: checkpoints/finetuned
+
+xai:
+  output_dir: results/maps
+  methods:
+    - gradcam
+    - rollout
+    - lime
+    - partition_shap
+    - integrated_gradients
+  gradcam:
+    grid_size: 14
+  rollout:
+    discard_ratio: 0.0
+    head_fusion: mean
+  lime:
+    num_samples: 1000
+    n_segments: 50
+    compactness: 10.0
+    ablation_segments: [25, 50, 100]
+  partition_shap:
+    max_evals: 500
+    batch_size: 32
+    masker: "blur(32,32)"
+  integrated_gradients:
+    n_steps: 50
+    baseline: black
+    ablation_steps: [20, 50, 100]
+
+evaluation:
+  metrics_dir: results/metrics
+  figures_dir: results/figures
+  faithfulness:
+    steps: 50
+    baselines: [black, blur]
+    blur_kernel_size: 21
+    blur_sigma: 10.0
+    include_random_baseline: true
+  sanity:
+    mode: cascading
+    metrics: [spearman, ssim]
+  graph_rewiring:
+    target_layer: -1
+    baselines: [black, blur]
+    steps: 20
+  noise_robustness:
+    enabled: false
+    noise_stds: [0.02, 0.05, 0.1]
