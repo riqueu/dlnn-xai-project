@@ -1,0 +1,119 @@
+\documentclass{article}
+
+\usepackage[preprint]{neurips_2026}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{xcolor}
+
+\title{Avaliação Comparativa da Fidelidade de Métodos de Explicabilidade em Modelos de Classificação de Imagens: Vision GNNs vs.\ Vision Transformers}
+
+\author{%
+  Henrique Coelho Beltrão \\
+  Código: B435909 \\
+  \texttt{riquecbeltrao@hotmail.com} \\
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Métodos de explicabilidade \textit{post-hoc} (Grad-CAM, LIME, SHAP, Integrated Gradients) são amplamente utilizados para interpretar modelos de visão computacional, mas raramente são avaliados de forma quantitativa e controlada entre arquiteturas que modelam interações entre regiões da imagem de maneiras distintas. Este projeto investiga se explicações geradas por esses métodos mantêm o mesmo nível de fidelidade (\textit{faithfulness}) quando aplicados a uma Vision Graph Neural Network isotrópica (\textbf{ViG-Ti}) e a um Vision Transformer (\textbf{DeiT-Tiny}) treinados na mesma tarefa de classificação de imagens. A pergunta de pesquisa é: \textit{os métodos de explicabilidade post-hoc preservam o mesmo grau de fidelidade ao comparar o message passing em grafos esparsos dinâmicos (ViG) com o self-attention denso global (ViT)?} A abordagem envolve o \textit{fine-tuning} controlado de ambos os \textit{backbones} no \textit{dataset} Imagenette, a geração de explicações por métodos agnósticos e nativos de arquitetura, e a avaliação quantitativa via Insertion/Deletion AUC e \textit{sanity checks} de aleatorização de parâmetros.
+\end{abstract}
+
+\section{Introduction}
+\label{sec:intro}
+
+Modelos de \textit{deep learning} para visão computacional atingem alta acurácia em tarefas de classificação, mas seu processo interno de decisão permanece opaco. Em domínios de alto risco --- como diagnóstico médico por imagem, veículos autônomos e inspeção industrial --- não basta prever corretamente a classe: é necessário justificar a decisão de forma auditável. Métodos de \textit{Explainable AI} (XAI) \textit{post-hoc}, como Grad-CAM, LIME, SHAP e Integrated Gradients, buscam produzir essas justificativas locais sem alterar a arquitetura do modelo.
+
+Um problema recorrente na literatura de XAI é que diferentes métodos geram mapas de atribuição distintos para a mesma predição, tornando difícil distinguir explicações de fato \textit{fiéis} (\textit{faithful}) ao raciocínio interno da rede daquelas apenas visualmente plausíveis para humanos. Essa questão ganha contornos ainda mais interessantes com a superação do paradigma estritamente convolucional (grade espacial rígida) por arquiteturas baseadas em relações entre \textit{patches}: os \textbf{Vision Transformers (ViTs)} \citep{dosovitskiy2021vit,touvron2021deit}, que modelam a imagem como um grafo completo via \textit{self-attention} denso entre todos os pares de \textit{tokens}, e as \textbf{Vision Graph Neural Networks (ViGs)} \citep{han2022vig}, que constroem um grafo esparso dinâmico ($k$-NN no espaço de \textit{features}) e propagam informação via \textit{message passing}.
+
+Por compartilharem a mesma representação isotrópica em \textit{patches} ($14 \times 14 = 196$ nós/\textit{tokens}), mesma profundidade e orçamento computacional equivalente, ViG e ViT constituem um par experimental muito mais comparável do que CNN vs.\ ViT: em vez de confundir hierarquia espacial com mecanismo de agregação, isola-se diretamente o efeito da conectividade em grafo esparso dinâmico frente ao \textit{self-attention} completo sobre a fidelidade das explicações \textit{post-hoc}.
+
+\textbf{Pergunta de pesquisa:} \textit{os métodos de explicabilidade post-hoc (Grad-CAM/Attention Rollout, LIME, SHAP e Integrated Gradients) mantêm o mesmo nível de fidelidade quando aplicados a uma Vision GNN (ViG-Ti) e a um Vision Transformer (DeiT-Tiny) treinados na mesma tarefa e no mesmo dataset?}
+
+\textbf{Objetivos:} (1) realizar o \textit{fine-tuning} controlado de uma Vision GNN isotrópica (ViG-Ti) e de um Vision Transformer (DeiT-Tiny) no Imagenette sob o mesmo protocolo; (2) gerar explicações locais em espaço de imagem com quatro famílias de XAI (métodos nativos de arquitetura, LIME, SHAP e Integrated Gradients); (3) quantificar a fidelidade por meio de métricas de Insertion/Deletion AUC e \textit{sanity checks} de aleatorização de parâmetros; (4) analisar se existem diferenças sistemáticas de fidelidade entre ViG e ViT e investigar como a topologia dinâmica do grafo $k$-NN interage com perturbações de entrada.
+
+\textbf{Conexão com a disciplina:} o projeto se conecta diretamente aos temas \textit{Explainable AI} (avaliação quantitativa de fidelidade de métodos \textit{post-hoc}) e \textit{Self-Attention / LLMs / VFM} (análise de Vision Transformers e \textit{attention}), incorporando ainda \textit{Graph Neural Networks} aplicadas à visão computacional.
+
+\section{Related Work}
+\label{sec:related}
+
+\textbf{Vision GNN e Vision Transformers.} \citet{dosovitskiy2021vit} introduziram o Vision Transformer (ViT), tratando imagens como sequências de \textit{patches} processados por blocos de \textit{self-attention} global, posteriormente tornado mais eficiente em dados por \citet{touvron2021deit} com a família DeiT. Generalizando grades (CNNs) e sequências (ViTs) como casos particulares de grafos, \citet{han2022vig} propuseram a Vision GNN (ViG), na qual cada \textit{patch} atua como um nó conectado dinamicamente aos seus $k$ vizinhos mais próximos no espaço de \textit{features}, com agregação via convolução em grafos (\textit{Grapher}) e módulos FFN para mitigar \textit{over-smoothing}. Este projeto adota a variante isotrópica ViG-Ti e o DeiT-Tiny como pares comparáveis.
+
+\textbf{Explicabilidade nativa em GNNs e Transformers.} Inspirados no Grad-CAM para CNNs \citep{selvaraju2017gradcam}, \citet{pope2019gnn} estenderam atribuições baseadas em gradientes para Graph Convolutional Networks, projetando gradientes da classe-alvo sobre as ativações dos nós. Em paralelo, \citet{ying2019gnnexplainer} propuseram o GNNExplainer, que otimiza máscaras de subgrafos e \textit{features} maximizando informação mútua com a predição; embora canônico para grafos genéricos, sua formulação em nível de arestas dificulta a comparação direta em espaço de pixels contra ViTs, motivo pelo qual este trabalho adota o Grad-CAM em nós na ViG-Ti. Para Transformers, \citet{abnar2020rollout} introduziram o Attention Rollout para agregar pesos de \textit{self-attention} entre camadas, enquanto \citet{chefer2021transformer} demonstraram que atenção bruta pode ser insuficientemente fiel por ser agnóstica à classe, propondo propagação de relevância ponderada por gradientes.
+
+\textbf{Explicabilidade agnóstica e baseada em gradientes de entrada.} \citet{ribeiro2016lime} (LIME) aproximam o classificador localmente por um modelo linear interpretável sobre perturbações de \textit{superpixels}, enquanto \citet{lundberg2017shap} (SHAP) unificam métodos de atribuição sob valores de Shapley com garantias axiomáticas de consistência. Já \citet{sundararajan2017ig} (Integrated Gradients) integram gradientes da saída em relação à entrada ao longo de um caminho linear a partir de um \textit{baseline}, satisfazendo sensibilidade e invariância de implementação. Os três métodos aplicam-se de forma estritamente simétrica tanto à ViG-Ti quanto ao DeiT-Tiny.
+
+\textbf{Avaliação quantitativa de fidelidade.} \citet{adebayo2018sanity} mostraram por meio de \textit{sanity checks} de aleatorização de parâmetros que diversos métodos de saliência permanecem quase inalterados mesmo quando os pesos aprendidos são destruídos. \citet{hooker2019roar} (ROAR) propuseram avaliar fidelidade removendo os pixels mais relevantes e re-treinando o modelo; dado o alto custo de re-treinamento, este projeto adota a alternativa sem re-treino de \citet{petsiuk2018rise} (Insertion/Deletion AUC), combinada aos testes de aleatorização de \citet{adebayo2018sanity}.
+
+\textbf{Lacuna explorada:} enquanto a fidelidade de XAI em CNNs e, mais recentemente, em ViTs é amplamente estudada, há escassez de comparações controladas entre GNNs visuais (ViG) e ViTs sob um mesmo protocolo quantitativo de fidelidade. Este projeto busca preencher essa lacuna isolando o papel do \textit{message passing} em grafo esparso dinâmico frente ao \textit{self-attention} denso.
+
+\section{Data}
+\label{sec:data}
+
+\textbf{Dataset:} utiliza-se o \textit{Imagenette} (fastai), subconjunto balanceado de 10 classes facilmente distinguíveis do ImageNet (\textit{tench}, \textit{English springer}, \textit{cassette player}, \textit{chain saw}, \textit{church}, \textit{French horn}, \textit{garbage truck}, \textit{gas pump}, \textit{golf ball} e \textit{parachute}), disponível em \url{https://github.com/fastai/imagenette} (código sob licença Apache 2.0 e imagens derivadas do ImageNet para pesquisa não comercial). O conjunto contém aproximadamente $13.394$ imagens JPEG ($9.469$ no treino oficial e $3.925$ na validação oficial), utilizando-se a versão \texttt{imagenette2-160} para agilizar I/O e armazenamento. As variáveis consistem apenas na imagem RGB e no rótulo de classe, sem dados faltantes ou desbalanceamento relevante.
+
+\textbf{Pré-processamento e divisão dos dados:} todas as imagens são redimensionadas para $224 \times 224$ pixels e normalizadas com a média e o desvio-padrão do ImageNet, formato esperado por ambos os \textit{backbones} pré-treinados. Para evitar vazamento de dados (\textit{data leakage}), a partição oficial de treino ($9.469$ imagens) é usada no \textit{fine-tuning} com \textit{data augmentation} leve (\textit{random resized crop} e \textit{horizontal flip}); a partição oficial de validação ($3.925$ imagens) é dividida de forma estratificada em $80\%$ para validação/seleção de \textit{checkpoint} e $20\%$ ($\sim 785$ imagens) reservados exclusivamente como conjunto de teste final, sem qualquer \textit{augmentation}.
+
+\textbf{Subconjunto fixo para avaliação de XAI:} executar métodos baseados em perturbação (LIME e Partition SHAP), curvas de Insertion/Deletion e \textit{sanity checks} sobre milhares de imagens exige dezenas de milhares de passagens \textit{forward}. Fixa-se, portanto, uma amostra estratificada de \textbf{100 imagens} do conjunto de teste (10 imagens por classe, mantendo a proporção ou registrando separadamente acertos e erros dos modelos), usada de forma idêntica em todos os experimentos de explicabilidade.
+
+\section{Methodology}
+\label{sec:method}
+
+\textbf{Arquiteturas comparadas:} são comparados dois \textit{backbones} isotrópicos pré-treinados no ImageNet-1k e submetidos a \textit{fine-tuning} no Imagenette sob o mesmo protocolo de otimização (mesmo otimizador, taxa de aprendizado base, escalonamento e critério de parada):
+\begin{itemize}
+    \item \textbf{ViG-Ti (Isotropic Vision GNN)} \citep{han2022vig}: divide a imagem $224 \times 224$ em $14 \times 14 = 196$ nós (\textit{patches}) com dimensão $D = 192$, empilhando $12$ blocos compostos por um módulo \textit{Grapher} (construção dinâmica de grafo $k$-NN dilatado no espaço de \textit{features} + Max-Relative Graph Convolution) e um módulo FFN ($\sim 7{,}1\text{M}$ parâmetros, $1{,}3\text{B}$ FLOPs).
+    \item \textbf{DeiT-Tiny (Vision Transformer)} \citep{touvron2021deit}: divide a mesma imagem em $14 \times 14 = 196$ \textit{tokens} de dimensão $D = 192$, empilhando $12$ blocos de \textit{multi-head self-attention} global e MLP ($\sim 5{,}7\text{M}$ parâmetros, $1{,}3\text{B}$ FLOPs).
+\end{itemize}
+A equivalência de granularidade ($196$ nós/\textit{tokens}), profundidade ($12$ camadas), largura ($D=192$) e FLOPs ($1{,}3\text{B}$) isola o contraste central: \textit{message passing} em grafo esparso dinâmico vs.\ \textit{self-attention} em grafo completo.
+
+\textbf{Métodos de explicabilidade:} para cada imagem da amostra fixa de teste, geram-se mapas de atribuição com quatro famílias de métodos:
+\begin{enumerate}
+    \item \textbf{Nativos de arquitetura:} \textit{Node-level Grad-CAM} \citep{pope2019gnn,selvaraju2017gradcam} aplicado ao mapa de ativações dos $196$ nós da última camada da ViG-Ti (antes do \textit{global average pooling}), e \textit{Attention Rollout} \citep{abnar2020rollout} aplicado às matrizes de \textit{self-attention} do DeiT-Tiny. Adicionalmente, como ambos os modelos preservam a grade espacial $14 \times 14$ na última camada, aplica-se também o Grad-CAM sobre os \textit{tokens} espaciais do DeiT-Tiny para permitir uma comparação simétrica baseada em gradientes internos.
+    \item \textbf{LIME} \citep{ribeiro2016lime}: agnóstico à arquitetura, ajustando um modelo linear local sobre perturbações de \textit{superpixels} SLIC.
+    \item \textbf{Partition SHAP} \citep{lundberg2017shap}: agnóstico à arquitetura, aproximando valores de Shapley por particionamento hierárquico da imagem.
+    \item \textbf{Integrated Gradients} \citep{sundararajan2017ig}: baseado em gradientes de entrada, aplicável de forma idêntica a ambos os modelos. Dado um \textit{baseline} $x'$ (imagem preta) e uma entrada $x$, a atribuição do pixel $i$ é aproximada por
+    \begin{equation}
+        \mathrm{IG}_i(x) = (x_i - x_i') \times \frac{1}{m}\sum_{k=1}^{m} \frac{\partial F\left(x' + \frac{k}{m}(x - x')\right)}{\partial x_i},
+    \end{equation}
+    onde $F$ representa o logit da classe prevista e $m$ o número de passos de interpolação.
+\end{enumerate}
+
+\textbf{Ressalva metodológica (Grad-CAM vs.\ Attention Rollout):} o Grad-CAM em nós é \textit{class-specific} (ponderado pelos gradientes da classe prevista $y$), enquanto o Attention Rollout puro agrega pesos brutos de \textit{self-attention}, sendo agnóstico à classe \citep{chefer2021transformer}. Essa assimetria será tratada explicitamente na análise, e a inclusão do Grad-CAM sobre os \textit{tokens} do DeiT-Tiny permite separar o efeito da arquitetura do efeito da formulação do explicador.
+
+\textbf{Baselines e controle negativo:} mapas de saliência gerados por ruído uniforme aleatório atuam como controle negativo nas métricas de Insertion/Deletion AUC (um explicador informativo deve superar amplamente o desempenho aleatório). Para os \textit{sanity checks} de \citet{adebayo2018sanity}, os modelos com pesos progressivamente aleatorizados servem como \textit{baseline} estrutural.
+
+\textbf{Pipeline geral:} \textit{fine-tuning} controlado (ViG-Ti e DeiT-Tiny) $\rightarrow$ seleção estratificada da amostra fixa de teste ($100$ imagens) $\rightarrow$ geração dos mapas de atribuição (modelo $\times$ método) $\rightarrow$ cálculo das métricas quantitativas de fidelidade, análise estrutural e inspeção qualitativa.
+
+\section{Proposed Experiments}
+\label{sec:exp}
+
+\textbf{Desenho experimental:} os experimentos são organizados de forma sequencial:
+\begin{itemize}
+    \item \textbf{E1 --- Fine-tuning controlado:} ajustar ViG-Ti e DeiT-Tiny no Imagenette sob condições comparáveis de treinamento, verificando convergência e acurácia no conjunto de teste antes da etapa de explicabilidade.
+    \item \textbf{E2 --- Geração das explicações:} executar os métodos de XAI (Grad-CAM em nós/\textit{tokens}, Attention Rollout, LIME, Partition SHAP e Integrated Gradients) sobre a amostra fixa de $100$ imagens para ambos os modelos, persistindo os mapas normalizados.
+    \item \textbf{E3 --- Avaliação de fidelidade (Insertion/Deletion AUC):} calcular as curvas de \textit{Deletion} e \textit{Insertion} \citep{petsiuk2018rise} removendo ou inserindo progressivamente pixels na ordem de importância indicada por cada explicação e medindo a área sob a curva de probabilidade da classe prevista. Para reduzir vieses de bordas artificiais, avalia-se a oclusão tanto com substituição por desfoque gaussiano quanto por imagem preta.
+    \item \textbf{E4 --- Sanity checks (aleatorização de parâmetros):} re-inicializar progressivamente os pesos das camadas (do cabeçalho de classificação em direção à entrada) seguindo \citet{adebayo2018sanity}, quantificando a queda de similaridade (correlação de postos de Spearman e SSIM) entre o mapa original e o mapa gerado pelo modelo randomizado.
+    \item \textbf{E5 --- Análise estrutural de perturbação na ViG (experimento complementar):} investigar se a remoção progressiva de regiões importantes no teste de \textit{Deletion} induz reconfiguração das arestas dinâmicas $k$-NN (\textit{graph rewiring}) na ViG-Ti, correlacionando a mudança topológica do grafo com a queda de confiança do modelo.
+    \item \textbf{E6 --- Teste de robustez a ruído (extensão opcional):} adicionar ruído gaussiano de baixa magnitude à entrada e medir a estabilidade dos mapas via correlação de postos de Spearman; será executado apenas após a conclusão integral de E1--E5.
+\end{itemize}
+
+\textbf{Métricas de avaliação:} (i) \textit{Deletion AUC} (menor é melhor: queda rápida de confiança ao remover regiões ditas importantes) e \textit{Insertion AUC} (maior é melhor: recuperação rápida ao inserir regiões importantes); (ii) correlação de postos de Spearman entre mapas originais e mapas pós-aleatorização de pesos nos \textit{sanity checks}; (iii) inspeção visual qualitativa de casos representativos, contrastando predições corretas, erros de classificação e instâncias em que a métrica quantitativa diverge da plausibilidade visual.
+
+\textbf{Comparações e ablações:} (1) cada método de XAI contra o \textit{baseline} de saliência aleatória; (2) ViG-Ti vs.\ DeiT-Tiny nos métodos simétricos (LIME, Partition SHAP, Integrated Gradients e Grad-CAM em nós/\textit{tokens}), além da comparação com o Attention Rollout; (3) ablação de hiperparâmetros dos explicadores (número de \textit{superpixels} no LIME e número de passos $m$ no Integrated Gradients) em um subconjunto reduzido para avaliar sensibilidade.
+
+\textbf{Ordem de execução:} (1) configuração do repositório, preparação dos \textit{splits} estratificados do Imagenette e \textit{fine-tuning} de ViG-Ti e DeiT-Tiny (E1); (2) implementação e validação dos explicadores e geração dos mapas de atribuição na amostra fixa (E2); (3) execução das métricas de Insertion/Deletion AUC, \textit{sanity checks} de aleatorização e análise de reconfiguração de arestas na ViG (E3, E4 e E5); (4) consolidação estatística, inspeção qualitativa, execução da extensão opcional (E6) se viável, e redação do relatório final no template da Etapa 2.
+
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\end{document}
