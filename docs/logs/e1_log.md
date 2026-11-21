@@ -35,7 +35,7 @@ O código oficial `vig_pytorch` (`huawei-noah/Efficient-AI-Backbones`) foi vendo
 ### 3.2 Padronização de Normalização e Precisão
 
 - Ambos os modelos usam a mesma normalização ImageNet (`mean=[0.485, 0.456, 0.406]`, `std=[0.229, 0.224, 0.225]`) e redimensionamento bicúbico `224x224`, em vez de `(0.5, 0.5, 0.5)` do `default_cfg` original da ViG. Isso garante entradas e baselines idênticos para todos os métodos de XAI e perturbações; durante o fine-tuning, as camadas de BatchNorm do `Stem` da ViG-Ti adaptam-se naturalmente a essa escala.
-- O treino e a avaliação foram executados em `FP32` na GPU (sem `autocast` fp16) para evitar erros de cancelamento numérico no cálculo de distâncias par-a-par (`pairwise_distance`) do grafo k-NN da ViG-Ti e manter paridade exata com a etapa de explicabilidade.
+- O treino e a avaliação foram executados em `FP32` na GPU (sem `autocast` fp16) para evitar erros de cancelamento numérico no cálculo de distâncias par-a-par (`pairwise_distance`) do grafo k-NN da ViG-Ti e manter paridade exata com a etapa de explicabilidade. Durante a validação de E2, desativou-se também `cudnn.allow_tf32` e `cuda.matmul.allow_tf32` em [`src/config.py`](../../src/config.py) (`set_seed`) e os checkpoints de E1 foram reavaliados com `--eval-only` em FP32 estrito para garantir consistência de `100/100` entre lotes `B=1` e `B=32/64`.
 
 ### 3.3 Hooks de Explicabilidade nos Wrappers ([`src/models/`](../../src/models/))
 
@@ -61,8 +61,8 @@ Mesmo protocolo para os dois modelos (`seed: 42`, dataloaders reconstruídos ant
 
 | Modelo | Params | Melhor Época | Tempo Treino | Best Val Loss | Best Val Acc | Test Loss | Test Acc | Test Macro-F1 | XAI Subset (100) |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| `ViG-Ti` | 6.169.994 | 12 | 815,6 s | 0,0599 | 98,50% | 0,0903 | 96,56% | 0,9656 | 97,0% (97/100) |
-| `DeiT-Tiny` | 5.526.346 | 14 | 355,3 s | 0,0864 | 97,64% | 0,1133 | 96,94% | 0,9694 | 97,0% (97/100) |
+| `ViG-Ti` | 6.169.994 | 12 | 814,8 s | 0,0599 | 98,50% | 0,0765 | 97,20% | 0,9720 | 97,0% (97/100) |
+| `DeiT-Tiny` | 5.526.346 | 14 | 354,9 s | 0,0864 | 97,64% | 0,1133 | 96,94% | 0,9694 | 97,0% (97/100) |
 
 ![Curvas de convergência no Imagenette (E1)](../../results/figures/e1_training_curves.png)
 
@@ -70,21 +70,21 @@ Acurácia por classe no teste: [`results/metrics/e1_per_class_accuracy.csv`](../
 
 ### 4.3 Concordância e Erros para Análise XAI
 
-- Conjunto de teste completo (`785` imagens): `745` ambos corretos, `13` somente `ViG-Ti` correto, `16` somente `DeiT-Tiny` correto, `11` ambos errados.
-- Subconjunto fixo de XAI (`100` imagens): `95` ambos corretos, `2` somente `ViG-Ti` correto, `2` somente `DeiT-Tiny` correto, `1` ambos errados.
+- Conjunto de teste completo (`785` imagens): `748` ambos corretos, `15` somente `ViG-Ti` correto, `13` somente `DeiT-Tiny` correto, `9` ambos errados.
+- Subconjunto fixo de XAI (`100` imagens): `96` ambos corretos, `1` somente `ViG-Ti` correto, `1` somente `DeiT-Tiny` correto, `2` ambos errados.
 - Casos de erro ou discordância dentro do [`xai_subset.csv`](../../data/splits/xai_subset.csv) (registrados em [`results/metrics/e1_test_predictions.csv`](../../results/metrics/e1_test_predictions.csv)):
-  - `n01440764_5690.JPEG` (`tench`): `ViG-Ti` acertou (`0`, conf `0,448`), `DeiT-Tiny` previu `French horn` (`5`, conf `0,641`).
-  - `n03000684_180.JPEG` (`chain saw`): `ViG-Ti` acertou (`3`, conf `0,871`), `DeiT-Tiny` previu `French horn` (`5`, conf `0,759`).
-  - `n03000684_14132.JPEG` (`chain saw`): `ViG-Ti` previu `gas pump` (`7`, conf `0,463`), `DeiT-Tiny` acertou (`3`, conf `0,825`).
-  - `n03888257_9770.JPEG` (`parachute`): `ViG-Ti` previu `tench` (`0`, conf `0,850`), `DeiT-Tiny` acertou (`9`, conf `0,790`).
-  - `n03028079_14900.JPEG` (`church`): ambos previram `gas pump` (`7`, conf `0,586` na `ViG-Ti` e `0,857` no `DeiT-Tiny`).
+  - `n01440764_5690.JPEG` (`tench`): ambos erraram (`ViG-Ti` previu `gas pump`, `7`, conf `0,430`; `DeiT-Tiny` previu `French horn`, `5`, conf `0,641`).
+  - `n03000684_180.JPEG` (`chain saw`): `ViG-Ti` acertou (`3`, conf `0,653`), `DeiT-Tiny` previu `French horn` (`5`, conf `0,759`).
+  - `n03888257_9770.JPEG` (`parachute`): `ViG-Ti` previu `tench` (`0`, conf `0,637`), `DeiT-Tiny` acertou (`9`, conf `0,790`).
+  - `n03028079_14900.JPEG` (`church`): ambos previram `gas pump` (`7`, conf `0,657` na `ViG-Ti` e `0,857` no `DeiT-Tiny`).
 
 ### 4.4 Observações
 
-- **Paridade de desempenho e análise de erros:** a diferença no conjunto de teste é de apenas `0,38` p.p. (`96,56%` vs. `96,94%`, 3 imagens em 785) e há empate exato no [`xai_subset.csv`](../../data/splits/xai_subset.csv) (`97/100`), eliminando a acurácia como fator de confusão para E3, E4 e E5. Como há apenas 3 erros por modelo no recorte de 100 imagens, a comparação de acertos vs. erros será conduzida de forma qualitativa (estudos de caso).
+- **Paridade de desempenho e análise de erros:** a diferença no conjunto de teste é de apenas `0,26` p.p. (`97,20%` vs. `96,94%`, 2 imagens em 785) e há empate exato no [`xai_subset.csv`](../../data/splits/xai_subset.csv) (`97/100`), eliminando a acurácia como fator de confusão para E3, E4 e E5. Como há apenas 3 erros por modelo no recorte de 100 imagens, a comparação de acertos vs. erros será conduzida de forma qualitativa (estudos de caso).
 - **Contagem de parâmetros vs. paper original:** no ImageNet-1k (1.000 classes), reportam-se ~7,1M (`ViG-Ti`) e ~5,7M (`DeiT-Tiny`); com o cabeçalho de 10 classes do Imagenette (`Conv2d(1024, 10, 1)` vs. `Linear(192, 10)`), os totais caem para `6,17M` e `5,53M`, deixando os dois modelos ainda mais próximos em capacidade.
-- **Loss de teste e confiança nos erros:** a `ViG-Ti` obteve menor `test_loss` (`0,0903` vs. `0,1133`) mesmo com acurácia ligeiramente menor; o `DeiT-Tiny` atingiu `train_loss = 0,0013` e apresentou confiança mais alta nos erros do subconjunto XAI (`0,641`, `0,759`, `0,857`), comportamento a observar nas curvas de probabilidade do Deletion/Insertion AUC (E3).
-- **Tempo de execução na GPU:** apesar dos FLOPs equivalentes (`1,3B`), a `ViG-Ti` levou ~2,3x mais tempo por época (`815,6 s` vs. `355,3 s`), pois o `DeiT-Tiny` usa `scaled_dot_product_attention` fundido em CUDA enquanto a busca `k`-NN dinâmica e `batched_index_select` da `ViG-Ti` são limitados por largura de banda de memória. Em E2, LIME e Partition SHAP devem usar inferência em mini-batches na GPU para manter o custo viável na `ViG-Ti`.
+- **Loss de teste e confiança nos erros:** a `ViG-Ti` obteve menor `test_loss` (`0,0765` vs. `0,1133`); o `DeiT-Tiny` atingiu `train_loss = 0,0013` e apresentou confiança mais alta nos erros do subconjunto XAI (`0,641`, `0,759`, `0,857` vs. `0,430`, `0,637`, `0,657` na `ViG-Ti`), comportamento a observar nas curvas de probabilidade do Deletion/Insertion AUC (E3).
+- **Sensibilidade numérica (TF32 vs. FP32 estrito) na ViG-Ti:** desativar `cudnn.allow_tf32` e `cuda.matmul.allow_tf32` em [`src/config.py`](../../src/config.py) eliminou variações de algoritmo cuDNN entre `B=1` e `B=32` que trocavam vizinhos discretos do `topk` em `DenseDilatedKnnGraph` na `ViG-Ti`, elevando a concordância `B=1` vs. `B=32` no `xai_subset` de `98/100` para `100/100` e a acurácia de teste de `96,56%` para `97,20%`, enquanto o `DeiT-Tiny` apresentou `0` diferenças nos `785` exemplos de teste.
+- **Tempo de execução na GPU:** apesar dos FLOPs equivalentes (`1,3B`), a `ViG-Ti` levou ~2,3x mais tempo por época (`814,8 s` vs. `354,9 s`), pois o `DeiT-Tiny` usa `scaled_dot_product_attention` fundido em CUDA enquanto a busca `k`-NN dinâmica e `batched_index_select` da `ViG-Ti` são limitados por largura de banda de memória. Em E2, LIME e Partition SHAP devem usar inferência em mini-batches na GPU para manter o custo viável na `ViG-Ti`.
 
 ## 5. Status Geral do Projeto
 
