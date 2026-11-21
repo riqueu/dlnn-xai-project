@@ -1,0 +1,52 @@
+[
+  {
+    "label": 0,
+    "synset": "n01440764",
+    "class_name": "tench"
+  },
+  {
+    "label": 1,
+    "synset": "n02102040",
+    "class_name": "English springer"
+  },
+  {
+    "label": 2,
+    "synset": "n02979186",
+    "class_name": "cassette player"
+  },
+  {
+    "label": 3,
+    "synset": "n03000684",
+    "class_name": "chain saw"
+  },
+  {
+    "label": 4,
+    "synset": "n03028079",
+    "class_name": "church"
+  },
+  {
+    "label": 5,
+    "synset": "n03394916",
+    "class_name": "French horn"
+  },
+  {
+    "label": 6,
+    "synset": "n03417042",
+    "class_name": "garbage truck"
+  },
+  {
+    "label": 7,
+    "synset": "n03425413",
+    "class_name": "gas pump"
+  },
+  {
+    "label": 8,
+    "synset": "n03445777",
+    "class_name": "golf ball"
+  },
+  {
+    "label": 9,
+    "synset": "n03888257",
+    "class_name": "parachute"
+  }
+]

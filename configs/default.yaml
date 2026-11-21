@@ -16,7 +16,8 @@ data:
 models:
   vig_ti:
     name: vig_ti_224_gelu
-    pretrained_ckpt: checkpoints/pretrained/vig_ti_74.5.pth.tar
+    pretrained_url: https://github.com/huawei-noah/Efficient-AI-Backbones/releases/download/vig/vig_ti_74.5.pth
+    pretrained_ckpt: checkpoints/pretrained/vig_ti_74.5.pth
     num_classes: 10
     k: 9
   deit_tiny:

@@ -1,0 +1,74 @@
+{
+  "seed": 42,
+  "val_ratio": 0.8,
+  "test_ratio": 0.2,
+  "counts": {
+    "train": 9469,
+    "val": 3140,
+    "test": 785,
+    "xai_subset": 100
+  },
+  "per_class": {
+    "tench": {
+      "train": 963,
+      "val": 310,
+      "test": 77,
+      "xai_subset": 10
+    },
+    "English springer": {
+      "train": 955,
+      "val": 316,
+      "test": 79,
+      "xai_subset": 10
+    },
+    "cassette player": {
+      "train": 993,
+      "val": 286,
+      "test": 71,
+      "xai_subset": 10
+    },
+    "chain saw": {
+      "train": 858,
+      "val": 309,
+      "test": 77,
+      "xai_subset": 10
+    },
+    "church": {
+      "train": 941,
+      "val": 327,
+      "test": 82,
+      "xai_subset": 10
+    },
+    "French horn": {
+      "train": 956,
+      "val": 315,
+      "test": 79,
+      "xai_subset": 10
+    },
+    "garbage truck": {
+      "train": 961,
+      "val": 311,
+      "test": 78,
+      "xai_subset": 10
+    },
+    "gas pump": {
+      "train": 931,
+      "val": 335,
+      "test": 84,
+      "xai_subset": 10
+    },
+    "golf ball": {
+      "train": 951,
+      "val": 319,
+      "test": 80,
+      "xai_subset": 10
+    },
+    "parachute": {
+      "train": 960,
+      "val": 312,
+      "test": 78,
+      "xai_subset": 10
+    }
+  },
+  "xai_subset_per_class": 10
+}
