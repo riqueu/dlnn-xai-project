@@ -50,6 +50,11 @@ def parse_args() -> argparse.Namespace:
         default="all",
         help="Modelo alvo do fine-tuning.",
     )
+    parser.add_argument(
+        "--eval-only",
+        action="store_true",
+        help="Reavalia os checkpoints salvos sem retreinar.",
+    )
     return parser.parse_args()
 
 
@@ -519,17 +524,46 @@ def _plot_training_curves(
     plt.close(fig)
 
 
+def _load_existing_train_info(model_key: str, config: dict[str, Any]) -> dict[str, Any]:
+    ckpt_dir = resolve_path(config["training"]["checkpoint_dir"])
+    ckpt_path = ckpt_dir / f"{model_key}_best.pt"
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+
+    wrapper = _load_model_from_checkpoint(model_key, config, ckpt_path)
+    total_params = sum(p.numel() for p in wrapper.parameters())
+    trainable_params = sum(p.numel() for p in wrapper.parameters() if p.requires_grad)
+
+    metrics_dir = resolve_path(config["evaluation"]["metrics_dir"])
+    hist_df = pd.read_csv(metrics_dir / f"e1_{model_key}_history.csv")
+
+    return {
+        "model": model_key,
+        "total_params": int(total_params),
+        "trainable_params": int(trainable_params),
+        "best_epoch": int(ckpt["best_epoch"]),
+        "epochs_trained": int(len(hist_df)),
+        "total_train_time_sec": float(hist_df["epoch_time_sec"].sum()),
+        "best_val_loss": float(ckpt["val_loss"]),
+        "best_val_acc": float(ckpt["val_acc"]),
+        "checkpoint_path": str(ckpt_path.relative_to(resolve_path("."))),
+    }
+
+
 def main() -> None:
     """Ponto de entrada para treinamento dos modelos."""
     args = parse_args()
     config = load_config(args.config)
+    set_seed(int(config["seed"]))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     model_keys = ["vig_ti", "deit_tiny"] if args.model == "all" else [args.model]
     train_infos: dict[str, dict[str, Any]] = {}
 
     for model_key in model_keys:
-        train_infos[model_key] = train_single_model(model_key, config, device)
+        if args.eval_only:
+            train_infos[model_key] = _load_existing_train_info(model_key, config)
+        else:
+            train_infos[model_key] = train_single_model(model_key, config, device)
 
     evaluate_models(model_keys, train_infos, config, device)
 
