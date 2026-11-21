@@ -1,0 +1,56 @@
+{
+  "seed": 42,
+  "device": "cuda",
+  "models": {
+    "vig_ti": {
+      "model": "vig_ti",
+      "total_params": 6169994,
+      "trainable_params": 6169994,
+      "best_epoch": 12,
+      "epochs_trained": 15,
+      "total_train_time_sec": 815.5519612860007,
+      "best_val_loss": 0.059851763686046576,
+      "best_val_acc": 0.9850318471337579,
+      "checkpoint_path": "checkpoints/finetuned/vig_ti_best.pt",
+      "test_loss": 0.09025022824099109,
+      "test_acc": 0.9656050955414013,
+      "test_macro_f1": 0.9656206065911217,
+      "xai_subset_acc": 0.97,
+      "xai_subset_correct": 97,
+      "xai_subset_errors": 3
+    },
+    "deit_tiny": {
+      "model": "deit_tiny",
+      "total_params": 5526346,
+      "trainable_params": 5526346,
+      "best_epoch": 14,
+      "epochs_trained": 15,
+      "total_train_time_sec": 355.34197002699875,
+      "best_val_loss": 0.08639430093940846,
+      "best_val_acc": 0.9764331210191083,
+      "checkpoint_path": "checkpoints/finetuned/deit_tiny_best.pt",
+      "test_loss": 0.11330131264818702,
+      "test_acc": 0.9694267515923567,
+      "test_macro_f1": 0.96937316051831,
+      "xai_subset_acc": 0.97,
+      "xai_subset_correct": 97,
+      "xai_subset_errors": 3
+    }
+  },
+  "agreement": {
+    "test": {
+      "total": 785,
+      "both_correct": 745,
+      "only_vig_ti_correct": 13,
+      "only_deit_tiny_correct": 16,
+      "both_wrong": 11
+    },
+    "xai_subset": {
+      "total": 100,
+      "both_correct": 95,
+      "only_vig_ti_correct": 2,
+      "only_deit_tiny_correct": 2,
+      "both_wrong": 1
+    }
+  }
+}
