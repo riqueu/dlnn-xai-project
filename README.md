@@ -8,7 +8,7 @@ Projeto da disciplina de Redes Neurais e Aprendizado Profundo comparando a fidel
 configs/       Hiperparâmetros e caminhos dos experimentos (default.yaml)
 data/          Dataset local (ignorado no git) e splits determinísticos em data/splits/
 checkpoints/   Pesos pré-treinados e checkpoints de fine-tuning (ignorados no git)
-docs/          Proposta do projeto em LaTeX e PDF
+docs/          Proposta (dlnn-proposta/), logs experimentais (logs/) e relatório final (dlnn-final/)
 src/           Módulos de dados, modelos (ViG-Ti, DeiT-Tiny), XAI e métricas
 scripts/       Pontos de entrada do pipeline experimental
 results/       Mapas salvos (ignorados), CSVs de métricas e figuras
