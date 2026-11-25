@@ -14,13 +14,19 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
-from scipy.stats import wilcoxon
+from scipy.stats import pearsonr, spearmanr, wilcoxon
 from tqdm import tqdm
 
 from src.config import load_config, resolve_path, set_seed
+from src.metrics.faithfulness import compute_deletion_insertion_auc, generate_random_saliency
+from src.metrics.graph_rewiring import measure_edge_stability
+from src.metrics.sanity import CASCADING_STAGES, compare_maps, randomize_stage_inplace
 from src.models.deit_tiny import load_deit_tiny
 from src.models.vig_ti import load_vig_ti
-from src.metrics.faithfulness import compute_deletion_insertion_auc, generate_random_saliency
+from src.xai.gradcam import compute_gradcam
+from src.xai.ig import compute_integrated_gradients
+from src.xai.perturbations import compute_lime, compute_partition_shap
+from src.xai.rollout import compute_attention_rollout
 from src.xai.utils import load_image_pair
 
 METHODS_BY_MODEL: dict[str, list[str]] = {
@@ -654,6 +660,773 @@ def run_e3(config: dict[str, Any], device: torch.device, limit: int | None = Non
     _plot_e3_auc_comparison(summary_df, n_images, figures_dir)
 
 
+STAGE_SHORT_LABELS = {
+    "original": "Orig",
+    "head": "Head",
+    "blocks_9_11": "Blk 9-11",
+    "blocks_6_11": "Blk 6-11",
+    "blocks_3_11": "Blk 3-11",
+    "blocks_0_11": "Blk 0-11",
+    "all_layers": "All",
+}
+
+
+def _select_stratified_indices(subset_df: pd.DataFrame, per_class: int) -> list[int]:
+    indices: list[int] = []
+    for _, grp in subset_df.groupby("label", sort=True):
+        indices.extend(int(i) for i in grp.index[:per_class])
+    return sorted(indices)
+
+
+def _explain_for_sanity(
+    method: str,
+    wrapper: torch.nn.Module,
+    image_rgb: np.ndarray,
+    image_tensor: torch.Tensor,
+    target_class: int,
+    config: dict[str, Any],
+    device: torch.device,
+    per_image_seed: int,
+) -> np.ndarray:
+    xai_cfg = config["xai"]
+    data_cfg = config["data"]
+
+    if method == "gradcam":
+        return compute_gradcam(wrapper, image_tensor, target_class=target_class)
+    if method == "rollout":
+        rollout_cfg = xai_cfg["rollout"]
+        return compute_attention_rollout(
+            wrapper,
+            image_tensor,
+            discard_ratio=float(rollout_cfg["discard_ratio"]),
+            head_fusion=str(rollout_cfg["head_fusion"]),
+        )
+    if method == "integrated_gradients":
+        ig_cfg = xai_cfg["integrated_gradients"]
+        return compute_integrated_gradients(
+            wrapper,
+            image_tensor,
+            target_class=target_class,
+            n_steps=int(ig_cfg["n_steps"]),
+            baseline=str(ig_cfg["baseline"]),
+            imagenet_mean=tuple(float(v) for v in data_cfg["imagenet_mean"]),
+            imagenet_std=tuple(float(v) for v in data_cfg["imagenet_std"]),
+        )
+    if method == "lime":
+        lime_cfg = xai_cfg["lime"]
+        return compute_lime(
+            wrapper,
+            image_rgb,
+            target_class=target_class,
+            config=config,
+            device=device,
+            num_samples=int(lime_cfg["num_samples"]),
+            n_segments=int(lime_cfg["n_segments"]),
+            compactness=float(lime_cfg["compactness"]),
+            seed=per_image_seed,
+        )
+    if method == "partition_shap":
+        shap_cfg = xai_cfg["partition_shap"]
+        return compute_partition_shap(
+            wrapper,
+            image_rgb,
+            target_class=target_class,
+            config=config,
+            device=device,
+            max_evals=int(shap_cfg["max_evals"]),
+            batch_size=int(shap_cfg["batch_size"]),
+            masker=str(shap_cfg["masker"]),
+            seed=per_image_seed,
+        )
+    raise ValueError(f"Metodo invalido para E4: {method}")
+
+
+def _compute_e4_wilcoxon(per_img_df: pd.DataFrame) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    stages = ["head", "all_layers"]
+    metrics = ["spearman", "ssim"]
+
+    for stage_name in stages:
+        for metric in metrics:
+            for method in ["gradcam", "lime", "partition_shap", "integrated_gradients"]:
+                mask_a = (
+                    (per_img_df["model"] == "vig_ti")
+                    & (per_img_df["method"] == method)
+                    & (per_img_df["stage_name"] == stage_name)
+                )
+                mask_b = (
+                    (per_img_df["model"] == "deit_tiny")
+                    & (per_img_df["method"] == method)
+                    & (per_img_df["stage_name"] == stage_name)
+                )
+                rows.append(
+                    _paired_wilcoxon(
+                        per_img_df,
+                        "vig_vs_deit_sanity",
+                        mask_a,
+                        mask_b,
+                        f"vig_ti/{method}",
+                        f"deit_tiny/{method}",
+                        stage_name,
+                        metric,
+                    )
+                )
+
+            rows.append(
+                _paired_wilcoxon(
+                    per_img_df,
+                    "deit_gradcam_vs_rollout_sanity",
+                    (per_img_df["model"] == "deit_tiny")
+                    & (per_img_df["method"] == "gradcam")
+                    & (per_img_df["stage_name"] == stage_name),
+                    (per_img_df["model"] == "deit_tiny")
+                    & (per_img_df["method"] == "rollout")
+                    & (per_img_df["stage_name"] == stage_name),
+                    "deit_tiny/gradcam",
+                    "deit_tiny/rollout",
+                    stage_name,
+                    metric,
+                )
+            )
+
+    return pd.DataFrame(rows)
+
+
+def _plot_e4_sanity_curves(summary_df: pd.DataFrame, figures_dir: Path) -> None:
+    plt.rcParams.update(
+        {
+            "font.size": 9.5,
+            "axes.titlesize": 10.5,
+            "axes.labelsize": 9.5,
+            "legend.fontsize": 8.2,
+        }
+    )
+    fig, axes = plt.subplots(2, 2, figsize=(12.0, 8.0), constrained_layout=True)
+
+    x_ticks = np.arange(len(CASCADING_STAGES), dtype=np.float64)
+    x_labels = [STAGE_SHORT_LABELS[s] for s in CASCADING_STAGES]
+
+    panels = [
+        (0, 0, "vig_ti", "spearman", "ViG-Ti: Spearman vs. Aleatorizacao em Cascata"),
+        (0, 1, "deit_tiny", "spearman", "DeiT-Tiny: Spearman vs. Aleatorizacao em Cascata"),
+        (1, 0, "vig_ti", "ssim", "ViG-Ti: SSIM vs. Aleatorizacao em Cascata"),
+        (1, 1, "deit_tiny", "ssim", "DeiT-Tiny: SSIM vs. Aleatorizacao em Cascata"),
+    ]
+
+    for row_idx, col_idx, model_key, metric, title in panels:
+        ax = axes[row_idx, col_idx]
+        for method in METHODS_BY_MODEL[model_key]:
+            sub = summary_df[
+                (summary_df["model"] == model_key) & (summary_df["method"] == method)
+            ].sort_values("stage_idx")
+            if sub.empty:
+                continue
+
+            means = sub[f"{metric}_mean"].to_numpy()
+            stds = sub[f"{metric}_std"].to_numpy()
+            ns = sub["n_images"].to_numpy(dtype=np.float64)
+            sems = stds / np.sqrt(ns)
+            n_val = int(ns[0])
+
+            color = METHOD_COLORS[method]
+            label = f"{METHOD_DISPLAY[method]} (n={n_val})"
+            ax.plot(x_ticks, means, marker="o", markersize=4.5, linewidth=2.0, color=color, label=label)
+            ax.fill_between(
+                x_ticks,
+                np.clip(means - sems, -1.0, 1.0),
+                np.clip(means + sems, -1.0, 1.0),
+                color=color,
+                alpha=0.14,
+            )
+
+        if metric == "spearman":
+            ax.axhline(0.0, color="#444444", linestyle="--", linewidth=1.0, alpha=0.7)
+            ax.set_ylim(-0.30, 1.08)
+            ax.set_ylabel("Correlacao de Spearman")
+        else:
+            ax.set_ylim(-0.05, 1.08)
+            ax.set_ylabel("SSIM")
+
+        ax.set_title(title)
+        ax.set_xticks(x_ticks)
+        ax.set_xticklabels(x_labels, rotation=15, ha="right")
+        ax.grid(True, linestyle=":", alpha=0.5)
+        ax.legend(loc="upper right", frameon=True)
+
+    fig.suptitle(
+        "Sanity Checks por Aleatorizacao em Cascata (E4: Adebayo et al., +/- 1 SEM)",
+        fontsize=12,
+    )
+    fig.savefig(figures_dir / "e4_sanity_curves.pdf", dpi=300)
+    fig.savefig(figures_dir / "e4_sanity_curves.png", dpi=300)
+    plt.close(fig)
+
+
+def run_e4(config: dict[str, Any], device: torch.device, limit: int | None = None) -> None:
+    """Executa o experimento E4 de sanity checks por aleatorizacao em cascata."""
+    t_start = time.perf_counter()
+    seed = int(config["seed"])
+    splits_dir = resolve_path(config["data"]["splits_dir"])
+    maps_dir = resolve_path(config["xai"]["output_dir"])
+    eval_cfg = config["evaluation"]
+    sanity_cfg = eval_cfg["sanity"]
+    metrics_dir = resolve_path(eval_cfg["metrics_dir"])
+    figures_dir = resolve_path(eval_cfg["figures_dir"])
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+    figures_dir.mkdir(parents=True, exist_ok=True)
+
+    subset_df = pd.read_csv(splits_dir / "xai_subset.csv")
+    pert_per_class = int(sanity_cfg.get("perturbation_per_class", 2))
+
+    if limit is not None:
+        fast_indices = list(range(min(limit, len(subset_df))))
+        pert_indices = list(range(min(limit, len(subset_df))))
+    else:
+        fast_indices = list(range(len(subset_df)))
+        pert_indices = _select_stratified_indices(subset_df, pert_per_class)
+
+    images_rgb: list[np.ndarray] = []
+    images_tensor: list[torch.Tensor] = []
+    for path in subset_df["image_path"]:
+        rgb, ten = load_image_pair(path, config)
+        images_rgb.append(rgb)
+        images_tensor.append(ten)
+
+    true_labels = subset_df["label"].to_numpy(dtype=np.int64)
+    image_paths = subset_df["image_path"].tolist()
+    per_image_rows: list[dict[str, Any]] = []
+
+    for model_key in ["vig_ti", "deit_tiny"]:
+        methods = list(METHODS_BY_MODEL[model_key])
+        method_indices = {
+            m: (pert_indices if m in {"lime", "partition_shap"} else fast_indices)
+            for m in methods
+        }
+
+        orig_maps: dict[str, np.ndarray] = {}
+        orig_targets: dict[str, np.ndarray] = {}
+        for method in methods:
+            archive_path = maps_dir / f"{model_key}_{method}.npz"
+            with np.load(archive_path, allow_pickle=False) as archive:
+                assert list(archive["image_paths"]) == image_paths, (
+                    f"Caminhos desalinhados em {archive_path}"
+                )
+                orig_maps[method] = archive["maps"]
+                orig_targets[method] = archive["target_classes"]
+
+            for idx in method_indices[method]:
+                per_image_rows.append(
+                    {
+                        "model": model_key,
+                        "method": method,
+                        "stage_idx": 0,
+                        "stage_name": "original",
+                        "image_idx": idx,
+                        "image_path": image_paths[idx],
+                        "true_label": int(true_labels[idx]),
+                        "target_class": int(orig_targets[method][idx]),
+                        "spearman": 1.0,
+                        "abs_spearman": 1.0,
+                        "ssim": 1.0,
+                        "is_constant_map": False,
+                    }
+                )
+
+        wrapper = _load_finetuned_model(model_key, config, device)
+        model_seed_offset = 0 if model_key == "vig_ti" else 100
+
+        for stage_idx, stage_name in enumerate(CASCADING_STAGES[1:], start=1):
+            stage_seed = seed + 1000 * stage_idx + model_seed_offset
+            randomize_stage_inplace(wrapper, model_key, stage_name, seed=stage_seed)
+
+            for method in methods:
+                idxs = method_indices[method]
+                desc = f"E4 {model_key}/{method} ({stage_name})"
+                stage_rhos: list[float] = []
+                stage_ssims: list[float] = []
+
+                for idx in tqdm(idxs, desc=desc, leave=False):
+                    per_img_seed = seed + idx
+                    set_seed(per_img_seed)
+                    target = int(orig_targets[method][idx])
+                    rand_map = _explain_for_sanity(
+                        method=method,
+                        wrapper=wrapper,
+                        image_rgb=images_rgb[idx],
+                        image_tensor=images_tensor[idx].to(device),
+                        target_class=target,
+                        config=config,
+                        device=device,
+                        per_image_seed=per_img_seed,
+                    )
+                    comp = compare_maps(orig_maps[method][idx], rand_map)
+                    stage_rhos.append(float(comp["spearman"]))
+                    stage_ssims.append(float(comp["ssim"]))
+
+                    per_image_rows.append(
+                        {
+                            "model": model_key,
+                            "method": method,
+                            "stage_idx": stage_idx,
+                            "stage_name": stage_name,
+                            "image_idx": idx,
+                            "image_path": image_paths[idx],
+                            "true_label": int(true_labels[idx]),
+                            "target_class": target,
+                            "spearman": float(comp["spearman"]),
+                            "abs_spearman": float(comp["abs_spearman"]),
+                            "ssim": float(comp["ssim"]),
+                            "is_constant_map": bool(comp["is_constant_map"]),
+                        }
+                    )
+
+                print(
+                    f"[E4] {model_key}/{method} ({stage_name}, n={len(idxs)}): "
+                    f"Spearman={np.mean(stage_rhos):.4f}+/-{np.std(stage_rhos):.4f} | "
+                    f"SSIM={np.mean(stage_ssims):.4f}+/-{np.std(stage_ssims):.4f}"
+                )
+
+    elapsed_total = time.perf_counter() - t_start
+    print(f"[E4] Concluido em {elapsed_total:.2f}s")
+
+    if limit is not None:
+        print("[E4] Modo --limit ativo: resultados completos em disco nao foram sobrescritos.")
+        return
+
+    per_img_df = pd.DataFrame(per_image_rows)
+    summary_rows: list[dict[str, Any]] = []
+    for (model_key, method, stage_idx, stage_name), grp in per_img_df.groupby(
+        ["model", "method", "stage_idx", "stage_name"], sort=False
+    ):
+        rhos = grp["spearman"].to_numpy(dtype=np.float64)
+        abs_rhos = grp["abs_spearman"].to_numpy(dtype=np.float64)
+        ssims = grp["ssim"].to_numpy(dtype=np.float64)
+        summary_rows.append(
+            {
+                "model": model_key,
+                "method": method,
+                "stage_idx": int(stage_idx),
+                "stage_name": stage_name,
+                "n_images": int(len(grp)),
+                "spearman_mean": float(rhos.mean()),
+                "spearman_std": float(rhos.std()),
+                "spearman_median": float(np.median(rhos)),
+                "abs_spearman_mean": float(abs_rhos.mean()),
+                "ssim_mean": float(ssims.mean()),
+                "ssim_std": float(ssims.std()),
+                "ssim_median": float(np.median(ssims)),
+                "constant_maps_count": int(grp["is_constant_map"].sum()),
+            }
+        )
+
+    summary_df = pd.DataFrame(summary_rows)
+    wilcoxon_df = _compute_e4_wilcoxon(per_img_df)
+
+    per_img_df.to_csv(metrics_dir / "e4_sanity_per_image.csv", index=False)
+    summary_df.to_csv(metrics_dir / "e4_sanity_summary.csv", index=False)
+    wilcoxon_df.to_csv(metrics_dir / "e4_wilcoxon_tests.csv", index=False)
+
+    summary_payload = {
+        "seed": seed,
+        "device": str(device),
+        "n_fast": len(fast_indices),
+        "n_perturbation": len(pert_indices),
+        "perturbation_per_class": pert_per_class,
+        "stages": CASCADING_STAGES,
+        "elapsed_sec": float(elapsed_total),
+        "summary": summary_rows,
+        "wilcoxon_tests": wilcoxon_df.to_dict(orient="records"),
+    }
+    with (metrics_dir / "e4_sanity_summary.json").open("w", encoding="utf-8") as handle:
+        json.dump(summary_payload, handle, indent=2, ensure_ascii=False)
+
+    _plot_e4_sanity_curves(summary_df, figures_dir)
+
+
+def _compute_e5_wilcoxon(per_img_df: pd.DataFrame, baselines: list[str]) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    for baseline in baselines:
+        for metric in ["rewiring_auc", "jaccard_auc"]:
+            for method in METHODS_BY_MODEL["vig_ti"]:
+                rows.append(
+                    _paired_wilcoxon(
+                        per_img_df,
+                        "rewiring_vs_random",
+                        (per_img_df["method"] == method) & (per_img_df["baseline"] == baseline),
+                        (per_img_df["method"] == "random") & (per_img_df["baseline"] == baseline),
+                        f"vig_ti/{method}",
+                        "vig_ti/random",
+                        baseline,
+                        metric,
+                    )
+                )
+    return pd.DataFrame(rows)
+
+
+def _plot_e5_graph_rewiring(
+    curves_df: pd.DataFrame,
+    layerwise_df: pd.DataFrame,
+    n_images: int,
+    figures_dir: Path,
+) -> None:
+    plt.rcParams.update(
+        {
+            "font.size": 9.5,
+            "axes.titlesize": 10.5,
+            "axes.labelsize": 9.5,
+            "legend.fontsize": 8.0,
+        }
+    )
+    fig, axes = plt.subplots(2, 2, figsize=(12.0, 8.2), constrained_layout=True)
+
+    vig_methods = METHODS_BY_MODEL["vig_ti"] + ["random"]
+    sem_scale = 1.0 / np.sqrt(float(n_images))
+
+    for col_idx, (baseline, b_title) in enumerate(
+        [("blur", "Desfoque Gaussiano (blur)"), ("black", "Imagem Preta (black)")]
+    ):
+        ax = axes[0, col_idx]
+        for method in vig_methods:
+            sub = curves_df[
+                (curves_df["method"] == method) & (curves_df["baseline"] == baseline)
+            ].sort_values("step")
+            frac = sub["fraction"].to_numpy() * 100.0
+            mean_rew = sub["rewiring_mean"].to_numpy() * 100.0
+            sem_rew = sub["rewiring_std"].to_numpy() * sem_scale * 100.0
+            auc_rew = float(np.trapezoid(sub["rewiring_mean"].to_numpy(), sub["fraction"].to_numpy()))
+
+            color = METHOD_COLORS[method]
+            ls = "--" if method == "random" else "-"
+            lw = 1.6 if method == "random" else 2.0
+            ax.plot(
+                frac,
+                mean_rew,
+                color=color,
+                linestyle=ls,
+                linewidth=lw,
+                label=f"{METHOD_DISPLAY[method]} (AUC={auc_rew:.3f})",
+            )
+            ax.fill_between(
+                frac,
+                np.clip(mean_rew - sem_rew, 0.0, 100.0),
+                np.clip(mean_rew + sem_rew, 0.0, 100.0),
+                color=color,
+                alpha=0.14,
+            )
+
+        ax.set_title(f"Rewiring de Arestas k-NN (Bloco 11): {b_title}")
+        ax.set_xlabel("Pixels removidos (%)")
+        ax.set_ylabel("Arestas alteradas (%)")
+        ax.set_xlim(0.0, 100.0)
+        ax.set_ylim(0.0, 100.0)
+        ax.grid(True, linestyle=":", alpha=0.5)
+        ax.legend(loc="lower right", frameon=True)
+
+    # Bottom-left: Trajetoria Media Queda de Confianca vs Rewiring
+    ax_traj = axes[1, 0]
+    for method in ["gradcam", "partition_shap", "lime", "random"]:
+        for baseline, ls, tag in [("blur", "-", "blur"), ("black", ":", "black")]:
+            sub = curves_df[
+                (curves_df["method"] == method) & (curves_df["baseline"] == baseline)
+            ].sort_values("step")
+            x_rew = sub["rewiring_mean"].to_numpy() * 100.0
+            y_drop = sub["prob_drop_mean"].to_numpy()
+            ax_traj.plot(
+                x_rew,
+                y_drop,
+                color=METHOD_COLORS[method],
+                linestyle=ls,
+                linewidth=1.8,
+                label=f"{METHOD_DISPLAY[method]} ({tag})",
+            )
+
+    ax_traj.set_title("Queda Media de Confianca vs. Rewiring (Bloco 11)")
+    ax_traj.set_xlabel("Arestas alteradas (%)")
+    ax_traj.set_ylabel("Queda de probabilidade (orig - pert)")
+    ax_traj.set_xlim(0.0, 100.0)
+    ax_traj.set_ylim(0.0, 0.95)
+    ax_traj.grid(True, linestyle=":", alpha=0.5)
+    ax_traj.legend(loc="upper left", ncol=2, fontsize=7.2, frameon=True)
+
+    # Bottom-right: Perfil por camada (Blocos 0..11) em 20% de Deletion
+    ax_layer = axes[1, 1]
+    layers = np.arange(12, dtype=np.int64)
+    for method in ["gradcam", "partition_shap", "random"]:
+        for baseline, ls, marker, tag in [
+            ("blur", "-", "o", "blur"),
+            ("black", "--", "s", "black"),
+        ]:
+            sub = layerwise_df[
+                (layerwise_df["method"] == method) & (layerwise_df["baseline"] == baseline)
+            ].sort_values("layer_idx")
+            vals = sub["rewiring_20_mean"].to_numpy() * 100.0
+            ax_layer.plot(
+                layers,
+                vals,
+                color=METHOD_COLORS[method],
+                linestyle=ls,
+                marker=marker,
+                markersize=3.8,
+                linewidth=1.8,
+                label=f"{METHOD_DISPLAY[method]} ({tag})",
+            )
+
+    ax_layer.set_title("Rewiring por Camada Grapher (20% Deletion)")
+    ax_layer.set_xlabel("Bloco Grapher (0 a 11)")
+    ax_layer.set_ylabel("Arestas alteradas (%)")
+    ax_layer.set_xticks(layers)
+    ax_layer.set_ylim(0.0, 100.0)
+    ax_layer.grid(True, linestyle=":", alpha=0.5)
+    ax_layer.legend(loc="upper left", ncol=2, fontsize=7.2, frameon=True)
+
+    fig.suptitle(
+        f"Analise Estrutural de Graph Rewiring k-NN na ViG-Ti (E5, N={n_images})",
+        fontsize=12,
+    )
+    fig.savefig(figures_dir / "e5_graph_rewiring.pdf", dpi=300)
+    fig.savefig(figures_dir / "e5_graph_rewiring.png", dpi=300)
+    plt.close(fig)
+
+
+def run_e5(config: dict[str, Any], device: torch.device, limit: int | None = None) -> None:
+    """Executa o experimento E5 de estabilidade e rewiring das arestas k-NN na ViG-Ti."""
+    t_start = time.perf_counter()
+    seed = int(config["seed"])
+    splits_dir = resolve_path(config["data"]["splits_dir"])
+    maps_dir = resolve_path(config["xai"]["output_dir"])
+    eval_cfg = config["evaluation"]
+    rew_cfg = eval_cfg["graph_rewiring"]
+    faith_cfg = eval_cfg["faithfulness"]
+    metrics_dir = resolve_path(eval_cfg["metrics_dir"])
+    figures_dir = resolve_path(eval_cfg["figures_dir"])
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+    figures_dir.mkdir(parents=True, exist_ok=True)
+
+    steps = int(rew_cfg["steps"])
+    target_layer = int(rew_cfg["target_layer"])
+    baselines = [str(b) for b in rew_cfg["baselines"]]
+    blur_kernel_size = int(faith_cfg["blur_kernel_size"])
+    blur_sigma = float(faith_cfg["blur_sigma"])
+
+    data_cfg = config["data"]
+    imagenet_mean = tuple(float(v) for v in data_cfg["imagenet_mean"])
+    imagenet_std = tuple(float(v) for v in data_cfg["imagenet_std"])
+    image_size = int(data_cfg["image_size"])
+
+    subset_df = pd.read_csv(splits_dir / "xai_subset.csv")
+    if limit is not None:
+        subset_df = subset_df.head(limit).reset_index(drop=True)
+    n_images = len(subset_df)
+
+    e1_preds_df = pd.read_csv(metrics_dir / "e1_test_predictions.csv").set_index("image_path")
+    images_rgb = [load_image_pair(p, config)[0] for p in subset_df["image_path"]]
+
+    wrapper = _load_finetuned_model("vig_ti", config, device)
+    expected_preds = e1_preds_df.loc[subset_df["image_path"], "vig_ti_pred"].to_numpy(dtype=np.int64)
+    true_labels = subset_df["label"].to_numpy(dtype=np.int64)
+    image_paths = subset_df["image_path"].tolist()
+
+    vig_methods = list(METHODS_BY_MODEL["vig_ti"]) + ["random"]
+    per_image_rows: list[dict[str, Any]] = []
+    curves_rows: list[dict[str, Any]] = []
+    layerwise_rows: list[dict[str, Any]] = []
+    summary_rows: list[dict[str, Any]] = []
+
+    for method in vig_methods:
+        if method == "random":
+            saliency_maps = np.stack(
+                [generate_random_saliency((image_size, image_size), seed=seed + idx) for idx in range(n_images)],
+                axis=0,
+            )
+            target_classes = expected_preds
+        else:
+            archive_path = maps_dir / f"vig_ti_{method}.npz"
+            with np.load(archive_path, allow_pickle=False) as archive:
+                saliency_maps = archive["maps"][:n_images]
+                target_classes = archive["target_classes"][:n_images]
+                archive_paths = list(archive["image_paths"][:n_images])
+            assert archive_paths == image_paths
+            assert (target_classes == expected_preds).all()
+
+        for baseline in baselines:
+            probs_mat = np.zeros((n_images, steps + 1), dtype=np.float64)
+            drop_mat = np.zeros((n_images, steps + 1), dtype=np.float64)
+            ret_mat = np.zeros((n_images, steps + 1), dtype=np.float64)
+            rew_mat = np.zeros((n_images, steps + 1), dtype=np.float64)
+            jac_mat = np.zeros((n_images, steps + 1), dtype=np.float64)
+            fractions_ref: np.ndarray | None = None
+
+            layer_rew20: dict[int, list[float]] = {l_idx: [] for l_idx in range(12)}
+            layer_jac20: dict[int, list[float]] = {l_idx: [] for l_idx in range(12)}
+            layer_rew50: dict[int, list[float]] = {l_idx: [] for l_idx in range(12)}
+            layer_jac50: dict[int, list[float]] = {l_idx: [] for l_idx in range(12)}
+
+            desc = f"E5 vig_ti/{method} ({baseline})"
+            for idx in tqdm(range(n_images), desc=desc, leave=False):
+                res = measure_edge_stability(
+                    model=wrapper,
+                    image=images_rgb[idx],
+                    saliency_map=saliency_maps[idx],
+                    target_class=int(target_classes[idx]),
+                    baseline=baseline,
+                    steps=steps,
+                    target_layer=target_layer,
+                    blur_kernel_size=blur_kernel_size,
+                    blur_sigma=blur_sigma,
+                    imagenet_mean=imagenet_mean,
+                    imagenet_std=imagenet_std,
+                    seed=seed + idx,
+                    capture_all_layers=True,
+                )
+
+                probs_mat[idx] = res["probs"]
+                drop_mat[idx] = res["prob_drop"]
+                ret_mat[idx] = res["retention"]
+                rew_mat[idx] = res["rewiring"]
+                jac_mat[idx] = res["jaccard_dist"]
+                if fractions_ref is None:
+                    fractions_ref = res["fractions"]
+
+                for l_idx, l_vals in res["layerwise"].items():
+                    layer_rew20[l_idx].append(l_vals["rewiring_20"])
+                    layer_jac20[l_idx].append(l_vals["jaccard_20"])
+                    layer_rew50[l_idx].append(l_vals["rewiring_50"])
+                    layer_jac50[l_idx].append(l_vals["jaccard_50"])
+
+                per_image_rows.append(
+                    {
+                        "model": "vig_ti",
+                        "method": method,
+                        "baseline": baseline,
+                        "image_idx": idx,
+                        "image_path": image_paths[idx],
+                        "true_label": int(true_labels[idx]),
+                        "target_class": int(target_classes[idx]),
+                        "orig_prob": float(res["orig_prob"]),
+                        "final_prob": float(res["final_prob"]),
+                        "deletion_auc": float(res["deletion_auc"]),
+                        "rewiring_auc": float(res["rewiring_auc"]),
+                        "jaccard_auc": float(res["jaccard_auc"]),
+                        "rewiring_20": float(res["rewiring_20"]),
+                        "rewiring_50": float(res["rewiring_50"]),
+                        "jaccard_20": float(res["jaccard_20"]),
+                        "jaccard_50": float(res["jaccard_50"]),
+                        "spearman_rewiring_vs_probdrop": float(res["spearman_rewiring_vs_probdrop"]),
+                        "pearson_rewiring_vs_probdrop": float(res["pearson_rewiring_vs_probdrop"]),
+                    }
+                )
+
+            assert fractions_ref is not None
+            mean_prob = probs_mat.mean(axis=0)
+            std_prob = probs_mat.std(axis=0)
+            mean_drop = drop_mat.mean(axis=0)
+            mean_ret = ret_mat.mean(axis=0)
+            mean_rew = rew_mat.mean(axis=0)
+            std_rew = rew_mat.std(axis=0)
+            mean_jac = jac_mat.mean(axis=0)
+            std_jac = jac_mat.std(axis=0)
+
+            for s_idx in range(steps + 1):
+                curves_rows.append(
+                    {
+                        "method": method,
+                        "baseline": baseline,
+                        "step": s_idx,
+                        "fraction": float(fractions_ref[s_idx]),
+                        "prob_mean": float(mean_prob[s_idx]),
+                        "prob_std": float(std_prob[s_idx]),
+                        "prob_drop_mean": float(mean_drop[s_idx]),
+                        "retention_mean": float(mean_ret[s_idx]),
+                        "rewiring_mean": float(mean_rew[s_idx]),
+                        "rewiring_std": float(std_rew[s_idx]),
+                        "jaccard_mean": float(mean_jac[s_idx]),
+                        "jaccard_std": float(std_jac[s_idx]),
+                    }
+                )
+
+            for l_idx in range(12):
+                layerwise_rows.append(
+                    {
+                        "method": method,
+                        "baseline": baseline,
+                        "layer_idx": l_idx,
+                        "rewiring_20_mean": float(np.mean(layer_rew20[l_idx])),
+                        "rewiring_20_std": float(np.std(layer_rew20[l_idx])),
+                        "jaccard_20_mean": float(np.mean(layer_jac20[l_idx])),
+                        "rewiring_50_mean": float(np.mean(layer_rew50[l_idx])),
+                        "rewiring_50_std": float(np.std(layer_rew50[l_idx])),
+                        "jaccard_50_mean": float(np.mean(layer_jac50[l_idx])),
+                    }
+                )
+
+            grp_df = pd.DataFrame(
+                [r for r in per_image_rows if r["method"] == method and r["baseline"] == baseline]
+            )
+            global_sp = float(spearmanr(mean_rew, mean_drop).statistic)
+            global_pe = float(pearsonr(mean_rew, mean_drop).statistic)
+
+            summary_row = {
+                "model": "vig_ti",
+                "method": method,
+                "baseline": baseline,
+                "n_images": n_images,
+                "deletion_auc_mean": float(grp_df["deletion_auc"].mean()),
+                "rewiring_auc_mean": float(grp_df["rewiring_auc"].mean()),
+                "rewiring_auc_std": float(grp_df["rewiring_auc"].std()),
+                "jaccard_auc_mean": float(grp_df["jaccard_auc"].mean()),
+                "jaccard_auc_std": float(grp_df["jaccard_auc"].std()),
+                "rewiring_20_mean": float(grp_df["rewiring_20"].mean()),
+                "rewiring_50_mean": float(grp_df["rewiring_50"].mean()),
+                "spearman_img_mean": float(grp_df["spearman_rewiring_vs_probdrop"].mean()),
+                "pearson_img_mean": float(grp_df["pearson_rewiring_vs_probdrop"].mean()),
+                "global_curve_spearman": global_sp,
+                "global_curve_pearson": global_pe,
+            }
+            summary_rows.append(summary_row)
+            print(
+                f"[E5] vig_ti/{method} ({baseline}): "
+                f"RewAUC={summary_row['rewiring_auc_mean']:.4f}+/-{summary_row['rewiring_auc_std']:.4f} | "
+                f"Rew20={summary_row['rewiring_20_mean']:.3f} | "
+                f"Rew50={summary_row['rewiring_50_mean']:.3f} | "
+                f"Corr(img)={summary_row['spearman_img_mean']:.3f}"
+            )
+
+    elapsed_total = time.perf_counter() - t_start
+    print(f"[E5] Concluido em {elapsed_total:.2f}s ({n_images} imagens)")
+
+    if limit is not None:
+        print("[E5] Modo --limit ativo: resultados completos em disco nao foram sobrescritos.")
+        return
+
+    per_img_df = pd.DataFrame(per_image_rows)
+    curves_df = pd.DataFrame(curves_rows)
+    layerwise_df = pd.DataFrame(layerwise_rows)
+    summary_df = pd.DataFrame(summary_rows)
+    wilcoxon_df = _compute_e5_wilcoxon(per_img_df, baselines)
+
+    per_img_df.to_csv(metrics_dir / "e5_rewiring_per_image.csv", index=False)
+    curves_df.to_csv(metrics_dir / "e5_rewiring_curves.csv", index=False)
+    layerwise_df.to_csv(metrics_dir / "e5_rewiring_layerwise.csv", index=False)
+    summary_df.to_csv(metrics_dir / "e5_rewiring_summary.csv", index=False)
+    wilcoxon_df.to_csv(metrics_dir / "e5_wilcoxon_tests.csv", index=False)
+
+    summary_payload = {
+        "seed": seed,
+        "device": str(device),
+        "n_images": n_images,
+        "steps": steps,
+        "target_layer": target_layer,
+        "baselines": baselines,
+        "elapsed_sec": float(elapsed_total),
+        "summary": summary_rows,
+        "wilcoxon_tests": wilcoxon_df.to_dict(orient="records"),
+    }
+    with (metrics_dir / "e5_rewiring_summary.json").open("w", encoding="utf-8") as handle:
+        json.dump(summary_payload, handle, indent=2, ensure_ascii=False)
+
+    _plot_e5_graph_rewiring(curves_df, layerwise_df, n_images, figures_dir)
+
+
 def main() -> None:
     """Ponto de entrada para avaliacao quantitativa."""
     args = parse_args()
@@ -661,11 +1434,12 @@ def main() -> None:
     set_seed(int(config["seed"]))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    if args.experiment == "e3":
+    if args.experiment in {"e3", "all"}:
         run_e3(config, device, limit=args.limit)
-        return
-    if args.experiment in {"e4", "e5", "all"}:
-        raise NotImplementedError(f"Experimento {args.experiment} ainda nao implementado.")
+    if args.experiment in {"e4", "all"}:
+        run_e4(config, device, limit=args.limit)
+    if args.experiment in {"e5", "all"}:
+        run_e5(config, device, limit=args.limit)
 
 
 if __name__ == "__main__":

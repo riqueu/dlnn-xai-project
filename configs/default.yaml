@@ -76,6 +76,7 @@ evaluation:
   sanity:
     mode: cascading
     metrics: [spearman, ssim]
+    perturbation_per_class: 2
   graph_rewiring:
     target_layer: -1
     baselines: [black, blur]
