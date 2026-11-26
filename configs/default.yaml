@@ -82,5 +82,9 @@ evaluation:
     baselines: [black, blur]
     steps: 20
   noise_robustness:
-    enabled: false
+    enabled: true
     noise_stds: [0.02, 0.05, 0.1]
+    perturbation_per_class: 2
+  ablation:
+    per_class: 2
+    baselines: [black, blur]

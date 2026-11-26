@@ -20,6 +20,7 @@ from tqdm import tqdm
 from src.config import load_config, resolve_path, set_seed
 from src.metrics.faithfulness import compute_deletion_insertion_auc, generate_random_saliency
 from src.metrics.graph_rewiring import measure_edge_stability
+from src.metrics.robustness import add_gaussian_noise, rgb_to_normalized_tensor
 from src.metrics.sanity import CASCADING_STAGES, compare_maps, randomize_stage_inplace
 from src.models.deit_tiny import load_deit_tiny
 from src.models.vig_ti import load_vig_ti
@@ -27,7 +28,7 @@ from src.xai.gradcam import compute_gradcam
 from src.xai.ig import compute_integrated_gradients
 from src.xai.perturbations import compute_lime, compute_partition_shap
 from src.xai.rollout import compute_attention_rollout
-from src.xai.utils import load_image_pair
+from src.xai.utils import get_predicted_class, load_image_pair
 
 METHODS_BY_MODEL: dict[str, list[str]] = {
     "vig_ti": ["gradcam", "lime", "partition_shap", "integrated_gradients"],
@@ -67,7 +68,7 @@ METHOD_COLORS = {
 def parse_args() -> argparse.Namespace:
     """Interpreta os argumentos de linha de comando."""
     parser = argparse.ArgumentParser(
-        description="Avalia fidelidade (E3), sanity checks (E4) e rewiring (E5).",
+        description="Avalia fidelidade (E3), sanity checks (E4), rewiring (E5) e robustez a ruido (E6).",
     )
     parser.add_argument(
         "--config",
@@ -78,7 +79,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--experiment",
         type=str,
-        choices=["e3", "e4", "e5", "all"],
+        choices=["e3", "e4", "e5", "e6", "all"],
         default="all",
         help="Experimento de avaliacao a executar.",
     )
@@ -1427,6 +1428,375 @@ def run_e5(config: dict[str, Any], device: torch.device, limit: int | None = Non
     _plot_e5_graph_rewiring(curves_df, layerwise_df, n_images, figures_dir)
 
 
+def _compute_e6_wilcoxon(per_img_df: pd.DataFrame, noise_stds: list[float]) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    for noise_std in noise_stds:
+        std_val = float(noise_std)
+        if std_val <= 0.0:
+            continue
+        std_tag = f"sigma_{std_val:.2f}"
+        for metric in ["spearman", "ssim"]:
+            for method in ["gradcam", "lime", "partition_shap", "integrated_gradients"]:
+                mask_a = (
+                    (per_img_df["model"] == "vig_ti")
+                    & (per_img_df["method"] == method)
+                    & (np.isclose(per_img_df["noise_std"], std_val))
+                )
+                mask_b = (
+                    (per_img_df["model"] == "deit_tiny")
+                    & (per_img_df["method"] == method)
+                    & (np.isclose(per_img_df["noise_std"], std_val))
+                )
+                rows.append(
+                    _paired_wilcoxon(
+                        per_img_df,
+                        "vig_vs_deit_robustness",
+                        mask_a,
+                        mask_b,
+                        f"vig_ti/{method}",
+                        f"deit_tiny/{method}",
+                        std_tag,
+                        metric,
+                    )
+                )
+
+            rows.append(
+                _paired_wilcoxon(
+                    per_img_df,
+                    "deit_gradcam_vs_rollout_robustness",
+                    (per_img_df["model"] == "deit_tiny")
+                    & (per_img_df["method"] == "gradcam")
+                    & (np.isclose(per_img_df["noise_std"], std_val)),
+                    (per_img_df["model"] == "deit_tiny")
+                    & (per_img_df["method"] == "rollout")
+                    & (np.isclose(per_img_df["noise_std"], std_val)),
+                    "deit_tiny/gradcam",
+                    "deit_tiny/rollout",
+                    std_tag,
+                    metric,
+                )
+            )
+
+    return pd.DataFrame(rows)
+
+
+def _plot_e6_noise_robustness(
+    summary_df: pd.DataFrame,
+    pred_stability: dict[str, dict[str, dict[str, float]]],
+    figures_dir: Path,
+) -> None:
+    plt.rcParams.update(
+        {
+            "font.size": 9.5,
+            "axes.titlesize": 10.5,
+            "axes.labelsize": 9.5,
+            "legend.fontsize": 8.0,
+        }
+    )
+    fig, axes = plt.subplots(2, 2, figsize=(12.0, 8.2), constrained_layout=True)
+
+    noise_vals = sorted(summary_df["noise_std"].unique().tolist())
+    max_sigma_key = f"{max(noise_vals):.2f}"
+
+    panels = [
+        (0, 0, "vig_ti", "spearman", "ViG-Ti: Spearman vs. Ruido Gaussiano"),
+        (0, 1, "deit_tiny", "spearman", "DeiT-Tiny: Spearman vs. Ruido Gaussiano"),
+        (1, 0, "vig_ti", "ssim", "ViG-Ti: SSIM vs. Ruido Gaussiano"),
+        (1, 1, "deit_tiny", "ssim", "DeiT-Tiny: SSIM vs. Ruido Gaussiano"),
+    ]
+
+    for row_idx, col_idx, model_key, metric, title in panels:
+        ax = axes[row_idx, col_idx]
+        for method in METHODS_BY_MODEL[model_key]:
+            sub = summary_df[
+                (summary_df["model"] == model_key) & (summary_df["method"] == method)
+            ].sort_values("noise_std")
+            if sub.empty:
+                continue
+
+            xs = sub["noise_std"].to_numpy(dtype=np.float64)
+            means = sub[f"{metric}_mean"].to_numpy(dtype=np.float64)
+            stds = sub[f"{metric}_std"].to_numpy(dtype=np.float64)
+            ns = sub["n_images"].to_numpy(dtype=np.float64)
+            sems = stds / np.sqrt(ns)
+            n_val = int(ns[0])
+
+            color = METHOD_COLORS[method]
+            label = f"{METHOD_DISPLAY[method]} (n={n_val})"
+            ax.plot(xs, means, marker="o", markersize=4.8, linewidth=2.0, color=color, label=label)
+            ax.fill_between(
+                xs,
+                np.clip(means - sems, 0.0, 1.0),
+                np.clip(means + sems, 0.0, 1.0),
+                color=color,
+                alpha=0.14,
+            )
+
+        if row_idx == 0:
+            flip_rate = pred_stability[model_key][max_sigma_key]["pred_changed_rate"] * 100.0
+            ax.text(
+                0.02,
+                0.04,
+                f"Troca de predicao em sigma={max_sigma_key}: {flip_rate:.1f}%",
+                transform=ax.transAxes,
+                fontsize=8.2,
+                bbox={"boxstyle": "round,pad=0.25", "facecolor": "white", "alpha": 0.85, "edgecolor": "#cccccc"},
+            )
+
+        ax.set_title(title)
+        ax.set_xlabel("Desvio-padrao do ruido gaussiano (sigma)")
+        ax.set_ylabel("Correlacao de Spearman" if metric == "spearman" else "SSIM")
+        ax.set_xticks(noise_vals)
+        ax.set_xticklabels([f"{v:.2f}" for v in noise_vals])
+        ax.set_ylim(0.0, 1.05)
+        ax.grid(True, linestyle=":", alpha=0.5)
+        ax.legend(loc="lower left" if row_idx == 1 else "upper right", frameon=True)
+
+    fig.suptitle(
+        "Robustez dos Explicadores a Ruido Gaussiano de Baixa Magnitude (E6, +/- 1 SEM)",
+        fontsize=12,
+    )
+    fig.savefig(figures_dir / "e6_noise_robustness.pdf", dpi=300)
+    fig.savefig(figures_dir / "e6_noise_robustness.png", dpi=300)
+    plt.close(fig)
+
+
+def run_e6(config: dict[str, Any], device: torch.device, limit: int | None = None) -> None:
+    """Executa o experimento E6 de robustez a ruido gaussiano na entrada."""
+    t_start = time.perf_counter()
+    seed = int(config["seed"])
+    splits_dir = resolve_path(config["data"]["splits_dir"])
+    maps_dir = resolve_path(config["xai"]["output_dir"])
+    eval_cfg = config["evaluation"]
+    noise_cfg = eval_cfg["noise_robustness"]
+    metrics_dir = resolve_path(eval_cfg["metrics_dir"])
+    figures_dir = resolve_path(eval_cfg["figures_dir"])
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+    figures_dir.mkdir(parents=True, exist_ok=True)
+
+    noise_stds = [float(s) for s in noise_cfg["noise_stds"]]
+    pert_per_class = int(noise_cfg.get("perturbation_per_class", 2))
+
+    data_cfg = config["data"]
+    imagenet_mean = tuple(float(v) for v in data_cfg["imagenet_mean"])
+    imagenet_std = tuple(float(v) for v in data_cfg["imagenet_std"])
+
+    subset_df = pd.read_csv(splits_dir / "xai_subset.csv")
+    if limit is not None:
+        fast_indices = list(range(min(limit, len(subset_df))))
+        pert_indices = list(range(min(limit, len(subset_df))))
+    else:
+        fast_indices = list(range(len(subset_df)))
+        pert_indices = _select_stratified_indices(subset_df, pert_per_class)
+
+    e1_preds_df = pd.read_csv(metrics_dir / "e1_test_predictions.csv").set_index("image_path")
+    images_rgb = [load_image_pair(p, config)[0] for p in subset_df["image_path"]]
+    true_labels = subset_df["label"].to_numpy(dtype=np.int64)
+    image_paths = subset_df["image_path"].tolist()
+
+    # Pre-computa entradas ruidosas compartilhadas entre os dois modelos
+    noisy_inputs: dict[tuple[float, int], tuple[np.ndarray, torch.Tensor]] = {}
+    for std_idx, sigma in enumerate(noise_stds):
+        for idx in fast_indices:
+            noise_seed = seed + 10000 * (std_idx + 1) + idx
+            noisy_rgb = add_gaussian_noise(images_rgb[idx], noise_std=sigma, seed=noise_seed)
+            noisy_tensor = rgb_to_normalized_tensor(noisy_rgb, imagenet_mean, imagenet_std)
+            noisy_inputs[(sigma, idx)] = (noisy_rgb, noisy_tensor)
+
+    per_image_rows: list[dict[str, Any]] = []
+    pred_stability: dict[str, dict[str, dict[str, float]]] = {}
+
+    for model_key in ["vig_ti", "deit_tiny"]:
+        methods = list(METHODS_BY_MODEL[model_key])
+        method_indices = {
+            m: (pert_indices if m in {"lime", "partition_shap"} else fast_indices)
+            for m in methods
+        }
+
+        expected_preds = e1_preds_df.loc[image_paths, f"{model_key}_pred"].to_numpy(dtype=np.int64)
+        expected_confs = e1_preds_df.loc[image_paths, f"{model_key}_conf"].to_numpy(dtype=np.float64)
+
+        orig_maps: dict[str, np.ndarray] = {}
+        orig_targets: dict[str, np.ndarray] = {}
+        for method in methods:
+            archive_path = maps_dir / f"{model_key}_{method}.npz"
+            with np.load(archive_path, allow_pickle=False) as archive:
+                assert list(archive["image_paths"]) == image_paths, (
+                    f"Caminhos desalinhados em {archive_path}"
+                )
+                orig_maps[method] = archive["maps"]
+                orig_targets[method] = archive["target_classes"]
+                assert (orig_targets[method] == expected_preds).all(), (
+                    f"Classes alvo desalinhadas em {archive_path}"
+                )
+
+            for idx in method_indices[method]:
+                per_image_rows.append(
+                    {
+                        "model": model_key,
+                        "method": method,
+                        "noise_std": 0.0,
+                        "image_idx": idx,
+                        "image_path": image_paths[idx],
+                        "true_label": int(true_labels[idx]),
+                        "target_class": int(orig_targets[method][idx]),
+                        "noisy_pred": int(orig_targets[method][idx]),
+                        "pred_changed": 0,
+                        "noisy_target_prob": float(expected_confs[idx]),
+                        "noisy_max_conf": float(expected_confs[idx]),
+                        "spearman": 1.0,
+                        "abs_spearman": 1.0,
+                        "ssim": 1.0,
+                        "is_constant_map": False,
+                    }
+                )
+
+        wrapper = _load_finetuned_model(model_key, config, device)
+        pred_stability[model_key] = {}
+
+        for sigma in noise_stds:
+            sigma_key = f"{sigma:.2f}"
+            pred_cache: dict[int, tuple[int, int, float, float]] = {}
+
+            with torch.no_grad():
+                for idx in fast_indices:
+                    noisy_tensor = noisy_inputs[(sigma, idx)][1].to(device)
+                    logits = wrapper(noisy_tensor)
+                    probs = torch.softmax(logits, dim=1)[0]
+                    noisy_pred = int(probs.argmax().item())
+                    noisy_max_conf = float(probs[noisy_pred].item())
+                    orig_target = int(expected_preds[idx])
+                    noisy_target_prob = float(probs[orig_target].item())
+                    pred_changed = int(noisy_pred != orig_target)
+                    pred_cache[idx] = (noisy_pred, pred_changed, noisy_target_prob, noisy_max_conf)
+
+            changed_arr = np.asarray([pred_cache[i][1] for i in fast_indices], dtype=np.float64)
+            tprob_arr = np.asarray([pred_cache[i][2] for i in fast_indices], dtype=np.float64)
+            pred_stability[model_key][sigma_key] = {
+                "n_images": int(len(fast_indices)),
+                "pred_changed_count": int(changed_arr.sum()),
+                "pred_changed_rate": float(changed_arr.mean()),
+                "target_prob_mean": float(tprob_arr.mean()),
+                "target_prob_std": float(tprob_arr.std()),
+            }
+            print(
+                f"[E6] {model_key} predicoes (sigma={sigma:.2f}, n={len(fast_indices)}): "
+                f"flip={int(changed_arr.sum())}/{len(fast_indices)} ({changed_arr.mean() * 100:.1f}%) | "
+                f"P(target)={tprob_arr.mean():.4f}"
+            )
+
+            for method in methods:
+                idxs = method_indices[method]
+                desc = f"E6 {model_key}/{method} (sigma={sigma:.2f})"
+                stage_rhos: list[float] = []
+                stage_ssims: list[float] = []
+
+                for idx in tqdm(idxs, desc=desc, leave=False):
+                    per_img_seed = seed + idx
+                    set_seed(per_img_seed)
+                    orig_target = int(orig_targets[method][idx])
+                    noisy_rgb, noisy_tensor = noisy_inputs[(sigma, idx)]
+
+                    noisy_map = _explain_for_sanity(
+                        method=method,
+                        wrapper=wrapper,
+                        image_rgb=noisy_rgb,
+                        image_tensor=noisy_tensor.to(device),
+                        target_class=orig_target,
+                        config=config,
+                        device=device,
+                        per_image_seed=per_img_seed,
+                    )
+                    comp = compare_maps(orig_maps[method][idx], noisy_map)
+                    stage_rhos.append(float(comp["spearman"]))
+                    stage_ssims.append(float(comp["ssim"]))
+
+                    noisy_pred, pred_changed, noisy_target_prob, noisy_max_conf = pred_cache[idx]
+                    per_image_rows.append(
+                        {
+                            "model": model_key,
+                            "method": method,
+                            "noise_std": float(sigma),
+                            "image_idx": idx,
+                            "image_path": image_paths[idx],
+                            "true_label": int(true_labels[idx]),
+                            "target_class": orig_target,
+                            "noisy_pred": noisy_pred,
+                            "pred_changed": pred_changed,
+                            "noisy_target_prob": noisy_target_prob,
+                            "noisy_max_conf": noisy_max_conf,
+                            "spearman": float(comp["spearman"]),
+                            "abs_spearman": float(comp["abs_spearman"]),
+                            "ssim": float(comp["ssim"]),
+                            "is_constant_map": bool(comp["is_constant_map"]),
+                        }
+                    )
+
+                print(
+                    f"[E6] {model_key}/{method} (sigma={sigma:.2f}, n={len(idxs)}): "
+                    f"Spearman={np.mean(stage_rhos):.4f}+/-{np.std(stage_rhos):.4f} | "
+                    f"SSIM={np.mean(stage_ssims):.4f}+/-{np.std(stage_ssims):.4f}"
+                )
+
+    elapsed_total = time.perf_counter() - t_start
+    print(f"[E6] Concluido em {elapsed_total:.2f}s")
+
+    if limit is not None:
+        print("[E6] Modo --limit ativo: resultados completos em disco nao foram sobrescritos.")
+        return
+
+    per_img_df = pd.DataFrame(per_image_rows)
+    summary_rows: list[dict[str, Any]] = []
+    for (model_key, method, noise_std), grp in per_img_df.groupby(
+        ["model", "method", "noise_std"], sort=False
+    ):
+        rhos = grp["spearman"].to_numpy(dtype=np.float64)
+        abs_rhos = grp["abs_spearman"].to_numpy(dtype=np.float64)
+        ssims = grp["ssim"].to_numpy(dtype=np.float64)
+        summary_rows.append(
+            {
+                "model": model_key,
+                "method": method,
+                "noise_std": float(noise_std),
+                "n_images": int(len(grp)),
+                "spearman_mean": float(rhos.mean()),
+                "spearman_std": float(rhos.std()),
+                "spearman_median": float(np.median(rhos)),
+                "abs_spearman_mean": float(abs_rhos.mean()),
+                "ssim_mean": float(ssims.mean()),
+                "ssim_std": float(ssims.std()),
+                "ssim_median": float(np.median(ssims)),
+                "pred_changed_rate": float(grp["pred_changed"].mean()),
+                "target_prob_mean": float(grp["noisy_target_prob"].mean()),
+                "constant_maps_count": int(grp["is_constant_map"].sum()),
+            }
+        )
+
+    summary_df = pd.DataFrame(summary_rows)
+    wilcoxon_df = _compute_e6_wilcoxon(per_img_df, noise_stds)
+
+    per_img_df.to_csv(metrics_dir / "e6_robustness_per_image.csv", index=False)
+    summary_df.to_csv(metrics_dir / "e6_robustness_summary.csv", index=False)
+    wilcoxon_df.to_csv(metrics_dir / "e6_wilcoxon_tests.csv", index=False)
+
+    summary_payload = {
+        "seed": seed,
+        "device": str(device),
+        "n_fast": len(fast_indices),
+        "n_perturbation": len(pert_indices),
+        "perturbation_per_class": pert_per_class,
+        "noise_stds": noise_stds,
+        "elapsed_sec": float(elapsed_total),
+        "prediction_stability": pred_stability,
+        "summary": summary_rows,
+        "wilcoxon_tests": wilcoxon_df.to_dict(orient="records"),
+    }
+    with (metrics_dir / "e6_robustness_summary.json").open("w", encoding="utf-8") as handle:
+        json.dump(summary_payload, handle, indent=2, ensure_ascii=False)
+
+    _plot_e6_noise_robustness(summary_df, pred_stability, figures_dir)
+
+
 def main() -> None:
     """Ponto de entrada para avaliacao quantitativa."""
     args = parse_args()
@@ -1440,6 +1810,10 @@ def main() -> None:
         run_e4(config, device, limit=args.limit)
     if args.experiment in {"e5", "all"}:
         run_e5(config, device, limit=args.limit)
+    if args.experiment == "e6" or (
+        args.experiment == "all" and bool(config["evaluation"]["noise_robustness"].get("enabled", False))
+    ):
+        run_e6(config, device, limit=args.limit)
 
 
 if __name__ == "__main__":
