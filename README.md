@@ -77,7 +77,7 @@ Tabela completa em [`results/metrics/summary_master_table.csv`](results/metrics/
 
 - Proposta: [`docs/dlnn-proposta.pdf`](docs/dlnn-proposta.pdf) ([`main.tex`](docs/dlnn-proposta/main.tex))
 - Registros experimentais: [`e1_log.md`](docs/logs/e1_log.md), [`e2_log.md`](docs/logs/e2_log.md), [`e3_log.md`](docs/logs/e3_log.md), [`e4_log.md`](docs/logs/e4_log.md), [`e5_log.md`](docs/logs/e5_log.md), [`e6_log.md`](docs/logs/e6_log.md) e [`ablations_analysis_log.md`](docs/logs/ablations_analysis_log.md)
-- Relatório final: [`docs/dlnn-final/main.tex`](docs/dlnn-final/main.tex)
+- Relatório final: [`docs/dlnn-final.pdf`](docs/dlnn-final.pdf) ([`main.tex`](docs/dlnn-final/main.tex))
 
 ## Licença
 
