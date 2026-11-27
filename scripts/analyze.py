@@ -16,24 +16,58 @@ import pandas as pd
 import torch
 from tqdm import tqdm
 
-from scripts.evaluate import (
-    METHOD_DISPLAY,
-    METHODS_BY_MODEL,
-    MODEL_DISPLAY,
-    _load_finetuned_model,
-    _select_stratified_indices,
-)
 from src.config import load_config, resolve_path, set_seed
 from src.metrics.faithfulness import compute_deletion_insertion_auc
 from src.metrics.sanity import compare_maps
+from src.models.deit_tiny import load_deit_tiny
+from src.models.vig_ti import load_vig_ti
 from src.xai.ig import compute_integrated_gradients
 from src.xai.perturbations import compute_lime
 from src.xai.utils import load_image_pair
+
+METHODS_BY_MODEL: dict[str, list[str]] = {
+    "vig_ti": ["gradcam", "lime", "partition_shap", "integrated_gradients"],
+    "deit_tiny": [
+        "gradcam",
+        "rollout",
+        "lime",
+        "partition_shap",
+        "integrated_gradients",
+    ],
+}
+
+MODEL_DISPLAY = {
+    "vig_ti": "ViG-Ti",
+    "deit_tiny": "DeiT-Tiny",
+}
 
 MODEL_COLORS = {
     "vig_ti": "#1f77b4",
     "deit_tiny": "#d62728",
 }
+
+
+def _load_finetuned_model(
+    model_key: str,
+    config: dict[str, Any],
+    device: torch.device,
+) -> torch.nn.Module:
+    ckpt_dir = resolve_path(config["training"]["checkpoint_dir"])
+    ckpt_path = ckpt_dir / f"{model_key}_best.pt"
+    if model_key == "vig_ti":
+        wrapper = load_vig_ti(config, checkpoint_path=ckpt_path)
+    elif model_key == "deit_tiny":
+        wrapper = load_deit_tiny(config, checkpoint_path=ckpt_path)
+    else:
+        raise ValueError(f"Modelo desconhecido: {model_key}")
+    return wrapper.to(device).eval()
+
+
+def _select_stratified_indices(subset_df: pd.DataFrame, per_class: int) -> list[int]:
+    indices: list[int] = []
+    for _, grp in subset_df.groupby("label", sort=True):
+        indices.extend(int(i) for i in grp.index[:per_class])
+    return sorted(indices)
 
 ERROR_CASE_INDICES = [33, 99, 5, 44]
 DIVERGENCE_CASE_INDICES = [50, 75, 80]

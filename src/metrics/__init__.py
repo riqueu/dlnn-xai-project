@@ -1,4 +1,4 @@
-"""Metricas quantitativas de fidelidade, sanity checks e estabilidade de grafo."""
+"""Metricas quantitativas de fidelidade, sanity checks, estabilidade de grafo e robustez."""
 
 from __future__ import annotations
 
@@ -11,6 +11,10 @@ from src.metrics.faithfulness import (
 from src.metrics.graph_rewiring import (
     compute_edge_metrics,
     measure_edge_stability,
+)
+from src.metrics.robustness import (
+    add_gaussian_noise,
+    rgb_to_normalized_tensor,
 )
 from src.metrics.sanity import (
     CASCADING_STAGES,
@@ -30,4 +34,6 @@ __all__ = [
     "run_cascading_randomization",
     "compute_edge_metrics",
     "measure_edge_stability",
+    "add_gaussian_noise",
+    "rgb_to_normalized_tensor",
 ]

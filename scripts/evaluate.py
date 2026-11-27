@@ -28,7 +28,7 @@ from src.xai.gradcam import compute_gradcam
 from src.xai.ig import compute_integrated_gradients
 from src.xai.perturbations import compute_lime, compute_partition_shap
 from src.xai.rollout import compute_attention_rollout
-from src.xai.utils import get_predicted_class, load_image_pair
+from src.xai.utils import load_image_pair
 
 METHODS_BY_MODEL: dict[str, list[str]] = {
     "vig_ti": ["gradcam", "lime", "partition_shap", "integrated_gradients"],
